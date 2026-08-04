@@ -1,0 +1,437 @@
+{
+  "name": "ICP Signal Detection & HubSpot Enrichment Pipeline",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "enrich",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [
+        0,
+        -464
+      ],
+      "id": "6f99bd2f-fe34-49da-8146-75c690852d8b",
+      "name": "Webhook",
+      "webhookId": "4ed91e9d-6a72-4d48-83df-de9660e0cce3"
+    },
+    {
+      "parameters": {
+        "url": "=https://api.hubapi.com/crm/v3/objects/companies/{{ $json.body.company_id || ($json.body[0] && $json.body[0].objectId) }}?properties=name,domain,website,industry,city,state,country,numberofemployees,annualrevenue,description,founded_year",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer pat-na2-57b18d6b-a85a-4d62-be59-e6ea31f5a128"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        224,
+        -464
+      ],
+      "id": "49569446-b9a3-4377-a918-c91db015ce5c",
+      "name": "Fetch HubSpot Company",
+      "retryOnFail": true,
+      "waitBetweenTries": 3000
+    },
+    {
+      "parameters": {
+        "jsCode": "const company = $input.first().json;\nconst properties = company.properties || {};\n\n// Get domain (fallback chain: domain → website → parse from url)\nlet domain = properties.domain || properties.website || '';\n\nif (!domain) {\n  throw new Error('No domain or website found for company');\n}\n\n// Clean the URL\nlet cleaned = domain.toLowerCase().trim();\ncleaned = cleaned.replace(/^https?:\\/\\//, '');\ncleaned = cleaned.replace(/^www\\./, '');\ncleaned = cleaned.replace(/\\/.*$/, '');\ncleaned = cleaned.replace(/\\/$/, '');\n\nconst fullUrl = 'https://' + cleaned;\n\nreturn [{\n  json: {\n    hubspot_id: company.id,\n    company_name: properties.name || cleaned,\n    website: fullUrl,\n    domain: cleaned,\n    existing_data: {\n      industry: properties.industry,\n      city: properties.city,\n      state: properties.state,\n      country: properties.country,\n      employees: properties.numberofemployees,\n      revenue: properties.annualrevenue,\n      description: properties.description,\n      founded: properties.founded_year\n    }\n  }\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        448,
+        -464
+      ],
+      "id": "cbd3c2e6-ef4e-4447-a7fa-6eebf940fa0a",
+      "name": "Clean Domain"
+    },
+    {
+      "parameters": {
+        "url": "={{ $json.website }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "User-Agent",
+              "value": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36"
+            }
+          ]
+        },
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "text"
+            }
+          },
+          "timeout": 10000
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        672,
+        -464
+      ],
+      "id": "eed452bb-405a-4573-b9c7-4e893a56d3cf",
+      "name": "Fetch Homepage",
+      "retryOnFail": true,
+      "waitBetweenTries": 5000,
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Get all input items\nconst items = $input.all();\n\n// Get previous data from Clean Domain node\nconst previousData = $('Clean Domain').item.json;\n\n// Try to get HTML from input\nlet html = '';\nif (items && items.length > 0) {\n  const input = items[0].json || {};\n  html = input.data || input.body || '';\n  if (typeof html !== 'string') {\n    html = JSON.stringify(html);\n  }\n}\n\n// If no HTML, return with empty text but continue\nif (!html || html.length < 100) {\n  return [{\n    json: {\n      ...previousData,\n      website_text: `TITLE: ${previousData.company_name}\\nMETA DESCRIPTION: Website could not be crawled\\n\\nCompany: ${previousData.company_name}\\nDomain: ${previousData.domain}`,\n      website_available: false,\n      detected_tech: []\n    }\n  }];\n}\n\n// Remove noise\nlet cleaned = html\n  .replace(/<script[\\s\\S]*?<\\/script>/gi, ' ')\n  .replace(/<style[\\s\\S]*?<\\/style>/gi, ' ')\n  .replace(/<noscript[\\s\\S]*?<\\/noscript>/gi, ' ')\n  .replace(/<svg[\\s\\S]*?<\\/svg>/gi, ' ')\n  .replace(/<!--[\\s\\S]*?-->/g, ' ');\n\n// Extract meta tags\nconst titleMatch = cleaned.match(/<title[^>]*>([^<]*)<\\/title>/i);\nconst title = titleMatch ? titleMatch[1].trim() : '';\n\nconst descMatch = cleaned.match(/<meta\\s+name=[\"']description[\"']\\s+content=[\"']([^\"']*)[\"']/i);\nconst metaDescription = descMatch ? descMatch[1].trim() : '';\n\nconst ogDescMatch = cleaned.match(/<meta\\s+property=[\"']og:description[\"']\\s+content=[\"']([^\"']*)[\"']/i);\nconst ogDescription = ogDescMatch ? ogDescMatch[1].trim() : '';\n\n// Detect tech stack\nconst techIndicators = {\n  'React': /react/i,\n  'Next.js': /next\\.js|nextjs|_next\\//i,\n  'Vue': /vue\\.js|vuejs/i,\n  'Angular': /angular/i,\n  'Shopify': /shopify|cdn\\.shopify/i,\n  'WordPress': /wp-content|wp-includes/i,\n  'HubSpot': /hs-scripts\\.com|hubspot/i,\n  'Segment': /segment\\.com|analytics\\.js/i,\n  'Intercom': /intercom/i,\n  'Stripe': /stripe\\.com|stripe\\.js/i,\n  'Cloudflare': /cloudflare/i,\n  'AWS': /amazonaws|aws-/i,\n  'Google Analytics': /googletagmanager|google-analytics/i,\n  'Mixpanel': /mixpanel/i,\n  'Amplitude': /amplitude/i,\n  'Vercel': /vercel/i\n};\n\nconst detectedTech = [];\nfor (const [tech, pattern] of Object.entries(techIndicators)) {\n  if (pattern.test(html)) {\n    detectedTech.push(tech);\n  }\n}\n\n// Remove HTML tags\ncleaned = cleaned.replace(/<[^>]+>/g, ' ');\n\n// Decode entities\ncleaned = cleaned\n  .replace(/&nbsp;/g, ' ')\n  .replace(/&amp;/g, '&')\n  .replace(/&lt;/g, '<')\n  .replace(/&gt;/g, '>')\n  .replace(/&quot;/g, '\"')\n  .replace(/&#39;/g, \"'\")\n  .replace(/&apos;/g, \"'\");\n\n// Collapse whitespace\ncleaned = cleaned.replace(/\\s+/g, ' ').trim();\n\n// Limit to 5000 chars\nconst truncated = cleaned.substring(0, 5000);\n\nconst websiteText = `TITLE: ${title}\nMETA DESCRIPTION: ${metaDescription}\nOG DESCRIPTION: ${ogDescription}\nDETECTED TECH STACK: ${detectedTech.join(', ') || 'Unknown'}\n\nPAGE CONTENT:\n${truncated}`;\n\nreturn [{\n  json: {\n    ...previousData,\n    website_text: websiteText,\n    website_available: true,\n    page_title: title,\n    meta_description: metaDescription,\n    detected_tech: detectedTech\n  }\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        896,
+        -464
+      ],
+      "id": "056ee934-c0ea-4c74-98fb-65b2a548fc4c",
+      "name": "Extract Website Text",
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.tavily.com/search",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer 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"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({\n  query: $json.company_name + \" \" + $json.domain + \" company size employees funding revenue tech stack hiring\",\n  search_depth: \"advanced\",\n  max_results: 5,\n  include_answer: true\n}) }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        1120,
+        -464
+      ],
+      "id": "0020f0e2-9190-4467-99a5-4b22f438e75d",
+      "name": "Tavily Research",
+      "retryOnFail": true,
+      "waitBetweenTries": 5000,
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-latest:generateContent?key=AQ.Ab8RN6IQ5eevPoWsveTHiaC0AfCh7rSjQmjfdxQ26hdTdYJP6w ",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({\n  contents: [{\n    parts: [{\n      text: $json.prompt\n    }]\n  }]\n}) }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        224,
+        -224
+      ],
+      "id": "8042067d-8ca0-40cf-b06f-b9f729ff1d9f",
+      "name": "Gemini ICP Analysis",
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 5000,
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.groq.com/openai/v1/chat/completions",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer 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"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({\n  model: \"llama-3.3-70b-versatile\",\n  messages: [\n    {\n      role: \"user\",\n      content: $json.prompt\n    }\n  ],\n  temperature: 0.3,\n  response_format: { type: \"json_object\" }\n}) }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        448,
+        -128
+      ],
+      "id": "26567b12-4616-44d3-ae48-dedf11e77058",
+      "name": "Groq ICP Analysis",
+      "retryOnFail": true,
+      "waitBetweenTries": 5000
+    },
+    {
+      "parameters": {
+        "jsCode": "const items = $input.all();\nconst tavilyData = items && items.length > 0 ? items[0].json : {};\n\nconst cleanData = $('Extract Website Text').item.json;\nconst hubspotData = $('Fetch HubSpot Company').item.json.properties || {};\n\n// Build comprehensive research context\nconst websiteText = cleanData.website_text || 'Website unavailable';\nconst detectedTech = (cleanData.detected_tech || []).join(', ') || 'Unknown';\n\n// Format Tavily research\nconst tavilyAnswer = tavilyData.answer || '';\nconst tavilyResults = (tavilyData.results || []).slice(0, 5).map(r => \n  `Title: ${r.title}\\nURL: ${r.url}\\nContent: ${r.content?.substring(0, 800)}`\n).join('\\n\\n---\\n\\n');\n\nconst prompt = `You are a Sales Ops expert scoring companies against an Ideal Customer Profile (ICP).\n\n===== YOUR TARGET ICP =====\nIndustry: SaaS / B2B Software / Enterprise Software\nCompany Size: 50-500 employees\nFunding Stage: Series A, B, or C\nTech Stack: Uses modern cloud tools (AWS, GCP, Azure, Kubernetes, React, Node, etc.)\nGrowth Signal: Hiring actively in past 90 days\nLocation: North America (US, Canada) or Europe (UK, Germany, France, Netherlands, etc.)\n\n===== SCORING RUBRIC (100 points total) =====\n- Industry Match (25 pts): 25 if pure SaaS/B2B software, 15 if tech-adjacent, 5 if hardware/services, 0 if unrelated\n- Company Size (20 pts): 20 if 50-500 employees, 10 if 20-50 or 500-1000, 0 if <20 or >1000\n- Funding Stage (15 pts): 15 if Series A/B/C, 10 if Seed or Series D, 5 if bootstrapped, 0 if acquired/public\n- Tech Stack (15 pts): 15 if uses modern cloud/SaaS tools, 5 if basic web, 0 if outdated tech\n- Growth Signals (15 pts): 15 if actively hiring + recent funding, 8 if some growth signals, 0 if declining\n- Location (10 pts): 10 if US/EU, 5 if other developed markets, 0 if emerging markets\n\n===== TIER CLASSIFICATION =====\n- HOT (80-100): Perfect ICP fit, prioritize immediately\n- WARM (60-79): Good fit, worth outreach\n- COLD (40-59): Partial fit, low priority\n- DISQUALIFIED (0-39): Not our ICP\n\n===== COMPANY TO SCORE =====\n\nCompany Name: ${cleanData.company_name}\nDomain: ${cleanData.domain}\nWebsite: ${cleanData.website}\n\nHubSpot Existing Data:\n- Industry: ${hubspotData.industry || 'Unknown'}\n- Employees: ${hubspotData.numberofemployees || 'Unknown'}\n- Revenue: ${hubspotData.annualrevenue || 'Unknown'}\n- Location: ${hubspotData.city || ''} ${hubspotData.state || ''} ${hubspotData.country || ''}\n- Founded: ${hubspotData.founded_year || 'Unknown'}\n- Description: ${hubspotData.description || 'Unknown'}\n\n===== WEBSITE CONTENT =====\n${websiteText.substring(0, 2500)}\n\n===== DETECTED TECH STACK =====\n${detectedTech}\n\n===== TAVILY RESEARCH =====\n${tavilyAnswer}\n\nAdditional Research:\n${tavilyResults.substring(0, 3000)}\n\n===== YOUR TASK =====\nScore this company against the ICP. Return ONLY valid JSON (no markdown, no code fences):\n\n{\n  \"icp_score\": 0-100,\n  \"icp_tier\": \"HOT\" | \"WARM\" | \"COLD\" | \"DISQUALIFIED\",\n  \"icp_reasoning\": \"2-3 sentence explanation of the score\",\n  \"scoring_breakdown\": {\n    \"industry_match\": 0-25,\n    \"company_size\": 0-20,\n    \"funding_stage\": 0-15,\n    \"tech_stack\": 0-15,\n    \"growth_signals\": 0-15,\n    \"location\": 0-10\n  },\n  \"estimated_employees\": number_or_null,\n  \"detected_industry\": \"string\",\n  \"detected_funding_stage\": \"Seed\" | \"Series A\" | \"Series B\" | \"Series C\" | \"Series D+\" | \"Bootstrapped\" | \"Public\" | \"Unknown\",\n  \"detected_tech_stack\": [\"tech1\", \"tech2\"],\n  \"detected_signals\": [\n    {\n      \"type\": \"FUNDING\" | \"HIRING\" | \"GROWTH\" | \"PRODUCT\" | \"LEADERSHIP\",\n      \"detail\": \"specific fact\"\n    }\n  ],\n  \"red_flags\": [\"any concerns about fit\"],\n  \"next_action\": \"one sentence recommendation for sales team\"\n}`;\n\nreturn [{\n  json: {\n    ...cleanData,\n    prompt: prompt,\n    tavily_data: tavilyData\n  }\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        0,
+        -224
+      ],
+      "id": "da24c60b-f9d6-4a33-ad26-a9cca6bdc07c",
+      "name": "Prepare ICP Prompt"
+    },
+    {
+      "parameters": {
+        "jsCode": "const items = $input.all();\nconst response = items && items.length > 0 ? items[0].json : {};\n\nconst cleanData = $('Extract Website Text').item.json;\n\n// Try Gemini format first, then Groq\nlet text = response?.candidates?.[0]?.content?.parts?.[0]?.text \n        || response?.choices?.[0]?.message?.content \n        || '';\n\nif (!text) {\n  throw new Error('Both Gemini and Groq returned no text');\n}\n\n// Clean markdown fences\ntext = text.trim();\ntext = text.replace(/^```json\\s*/i, '');\ntext = text.replace(/^```\\s*/i, '');\ntext = text.replace(/```\\s*$/i, '');\ntext = text.trim();\n\nlet scoring;\ntry {\n  scoring = JSON.parse(text);\n} catch (err) {\n  throw new Error('Failed to parse ICP JSON: ' + err.message + '\\n\\nRaw: ' + text.substring(0, 500));\n}\n\n// Extract signals as formatted string for HubSpot\nconst signalsFormatted = (scoring.detected_signals || [])\n  .map(s => `[${s.type}] ${s.detail}`)\n  .join('\\n');\n\n// Extract tech stack as string\nconst techStackFormatted = (scoring.detected_tech_stack || cleanData.detected_tech || []).join(', ');\n\nreturn [{\n  json: {\n    hubspot_id: cleanData.hubspot_id,\n    company_name: cleanData.company_name,\n    website: cleanData.website,\n    domain: cleanData.domain,\n    \n    // Core ICP data\n    icp_score: scoring.icp_score || 0,\n    icp_tier: scoring.icp_tier || 'PENDING',\n    icp_reasoning: scoring.icp_reasoning || 'No reasoning provided',\n    \n    // Detected properties\n    estimated_employees: scoring.estimated_employees || null,\n    detected_industry: scoring.detected_industry || 'Unknown',\n    detected_funding_stage: scoring.detected_funding_stage || 'Unknown',\n    detected_tech_stack: techStackFormatted,\n    detected_signals: signalsFormatted,\n    \n    // Additional data\n    scoring_breakdown: scoring.scoring_breakdown || {},\n    red_flags: scoring.red_flags || [],\n    next_action: scoring.next_action || '',\n    \n    // Full raw scoring\n    scoring_json: scoring,\n    \n    // Metadata\n    enrichment_date: new Date().toISOString(),\n    enrichment_status: 'Enriched'\n  }\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        448,
+        -288
+      ],
+      "id": "55f7879b-a9d2-469a-aef2-4e8c55854f63",
+      "name": "Parse ICP Score"
+    },
+    {
+      "parameters": {
+        "method": "PATCH",
+        "url": "=https://api.hubapi.com/crm/v3/objects/companies/{{ $json.hubspot_id }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer pat-na2-57b18d6b-a85a-4d62-be59-e6ea31f5a128"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({\n  properties: {\n    icp_score: Math.round(Number($json.icp_score) || 0),\n    icp_tier: ['HOT', 'WARM', 'COLD', 'DISQUALIFIED', 'PENDING'].includes(String($json.icp_tier).toUpperCase()) ? String($json.icp_tier).toUpperCase() : 'PENDING',\n    icp_reasoning: String($json.icp_reasoning || '').substring(0, 5000),\n    enrichment_date: new Date(new Date().toISOString().split('T')[0]).getTime(),\n    detected_signals: String($json.detected_signals || '').substring(0, 5000),\n    tech_stack: String($json.detected_tech_stack || '').substring(0, 5000),\n    estimated_employees: $json.estimated_employees ? Math.round(Number($json.estimated_employees)) : null\n  }\n}) }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        688,
+        -224
+      ],
+      "id": "c62ce6c6-d9d1-4aa2-979c-672e24a0a61c",
+      "name": "Update HubSpot",
+      "retryOnFail": true,
+      "waitBetweenTries": 3000
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({\n  status: \"success\",\n  company: {\n    hubspot_id: $('Parse ICP Score').item.json.hubspot_id,\n    name: $('Parse ICP Score').item.json.company_name,\n    website: $('Parse ICP Score').item.json.website\n  },\n  icp: {\n    score: $('Parse ICP Score').item.json.icp_score,\n    tier: $('Parse ICP Score').item.json.icp_tier,\n    reasoning: $('Parse ICP Score').item.json.icp_reasoning,\n    breakdown: $('Parse ICP Score').item.json.scoring_breakdown,\n    next_action: $('Parse ICP Score').item.json.next_action\n  },\n  detected: {\n    industry: $('Parse ICP Score').item.json.detected_industry,\n    funding_stage: $('Parse ICP Score').item.json.detected_funding_stage,\n    tech_stack: $('Parse ICP Score').item.json.detected_tech_stack,\n    signals: $('Parse ICP Score').item.json.detected_signals,\n    estimated_employees: $('Parse ICP Score').item.json.estimated_employees\n  },\n  hubspot_updated: true\n}) }}",
+        "options": {
+          "responseCode": 200,
+          "responseHeaders": {
+            "entries": [
+              {}
+            ]
+          }
+        }
+      },
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.5,
+      "position": [
+        912,
+        -224
+      ],
+      "id": "a2693659-c588-43f5-b6c6-a39c1238df00",
+      "name": "Send Response"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Webhook": {
+      "main": [
+        [
+          {
+            "node": "Fetch HubSpot Company",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch HubSpot Company": {
+      "main": [
+        [
+          {
+            "node": "Clean Domain",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Clean Domain": {
+      "main": [
+        [
+          {
+            "node": "Fetch Homepage",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Homepage": {
+      "main": [
+        [
+          {
+            "node": "Extract Website Text",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract Website Text": {
+      "main": [
+        [
+          {
+            "node": "Tavily Research",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Tavily Research": {
+      "main": [
+        [
+          {
+            "node": "Prepare ICP Prompt",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        []
+      ]
+    },
+    "Gemini ICP Analysis": {
+      "main": [
+        [
+          {
+            "node": "Parse ICP Score",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Groq ICP Analysis",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Groq ICP Analysis": {
+      "main": [
+        [
+          {
+            "node": "Update HubSpot",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare ICP Prompt": {
+      "main": [
+        [
+          {
+            "node": "Gemini ICP Analysis",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse ICP Score": {
+      "main": [
+        [
+          {
+            "node": "Update HubSpot",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Update HubSpot": {
+      "main": [
+        [
+          {
+            "node": "Send Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate",
+    "availableInMCP": false,
+    "timeSavedMode": "fixed",
+    "callerPolicy": "workflowsFromSameOwner"
+  },
+  "versionId": "eadb52d1-0d1a-4847-a4a7-7e2aaf4eaa63",
+  "meta": {
+    "instanceId": "4a28000cb5ce9a4a10bc436f5e83f9914ea21edec9648ec607630a7f0abc691b"
+  },
+  "nodeGroups": [],
+  "id": "b5l1yTOUawnnp64G",
+  "tags": []
+}

@@ -1,0 +1,207 @@
+{
+  "name": "HubSpot Bulk ICP Enrichment",
+  "nodes": [
+    {
+      "parameters": {},
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        0,
+        192
+      ],
+      "id": "1ac46529-ac58-4983-807d-0f19b4ad2b80",
+      "name": "When clicking ‘Execute workflow’"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.hubapi.com/crm/v3/objects/companies/search",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer pat-na2-57b18d6b-a85a-4d62-be59-e6ea31f5a128"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({\n  filterGroups: [\n    {\n      filters: [\n        {\n          propertyName: \"icp_score\",\n          operator: \"NOT_HAS_PROPERTY\"\n        }\n      ]\n    }\n  ],\n  properties: [\"name\", \"domain\", \"website\"],\n  limit: 20\n}) }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        224,
+        192
+      ],
+      "id": "dc7cd0c9-3a19-4942-a742-3841c0b37f85",
+      "name": "Fetch All Companies"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Get the input from Fetch All Companies\nconst items = $input.all();\nconst response = items && items.length > 0 ? items[0].json : {};\n\nconst companies = response.results || [];\n\nconsole.log(`Found ${companies.length} companies to enrich`);\n\nif (companies.length === 0) {\n  return [{\n    json: {\n      message: \"No companies need enrichment\",\n      total: 0\n    }\n  }];\n}\n\n// Convert each company into an individual item\nreturn companies.map(company => ({\n  json: {\n    company_id: company.id,\n    name: company.properties?.name || 'Unknown',\n    domain: company.properties?.domain || '',\n    website: company.properties?.website || ''\n  }\n}));"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        448,
+        192
+      ],
+      "id": "03b632b1-ea78-48fd-b1e4-634ec99a5726",
+      "name": "Split Companies"
+    },
+    {
+      "parameters": {
+        "options": {}
+      },
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [
+        672,
+        192
+      ],
+      "id": "669a48a2-6041-454a-8670-1a972fa1d91f",
+      "name": "Loop Over Items"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://localhost:5678/webhook/enrich",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        896,
+        224
+      ],
+      "id": "169b94d1-7840-4925-90f5-baa9a47eb0c5",
+      "name": "Enrich Company",
+      "retryOnFail": true,
+      "waitBetweenTries": 3000,
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "amount": 10
+      },
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [
+        1120,
+        224
+      ],
+      "id": "2b703937-794e-43d1-be39-c9ea9d7f7280",
+      "name": "Wait",
+      "webhookId": "71722ded-1c87-46ce-8d0d-975fafdc2a0e"
+    },
+    {
+      "parameters": {
+        "jsCode": "const items = $input.all();\n\nreturn [{\n  json: {\n    status: \"completed\",\n    total_processed: items.length,\n    message: `Successfully enriched ${items.length} companies`,\n    timestamp: new Date().toISOString()\n  }\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        896,
+        80
+      ],
+      "id": "ed52d694-041c-45dc-90d2-f60dc5398400",
+      "name": "Send Summary"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "When clicking ‘Execute workflow’": {
+      "main": [
+        [
+          {
+            "node": "Fetch All Companies",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch All Companies": {
+      "main": [
+        [
+          {
+            "node": "Split Companies",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Split Companies": {
+      "main": [
+        [
+          {
+            "node": "Loop Over Items",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Loop Over Items": {
+      "main": [
+        [
+          {
+            "node": "Send Summary",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Enrich Company",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Enrich Company": {
+      "main": [
+        [
+          {
+            "node": "Wait",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Wait": {
+      "main": [
+        [
+          {
+            "node": "Loop Over Items",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate",
+    "availableInMCP": false
+  },
+  "versionId": "2191fee6-647e-4e4a-a101-39f25d1bb6bb",
+  "meta": {
+    "instanceId": "4a28000cb5ce9a4a10bc436f5e83f9914ea21edec9648ec607630a7f0abc691b"
+  },
+  "nodeGroups": [],
+  "id": "F9ghP6PMOSm8eR8p",
+  "tags": []
+}
